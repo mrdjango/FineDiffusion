@@ -73,27 +73,42 @@ class LabelEmbedder(nn.Module):
     def __init__(self, num_classes, num_super_classes, hidden_size, dropout_prob):
         super().__init__()
         use_cfg_embedding = dropout_prob > 0
-        # self.embedding_table = nn.Embedding(num_classes + use_cfg_embedding, hidden_size)
-        # 11 superclass embeddings
-        if use_cfg_embedding:
-            self.embedding_table = nn.Embedding(num_classes + num_super_classes, hidden_size)
+        num_embeddings = num_classes + (num_super_classes if use_cfg_embedding else 0)
+        self.embedding_table = nn.Embedding(num_embeddings, hidden_size)
 
         self.num_classes = num_classes
         self.num_super_classes = num_super_classes
         self.dropout_prob = dropout_prob
 
+    def superclass_labels(self, labels):
+        """
+        Map dropped subclass labels to superclass/null labels.
 
-    def token_drop(self, labels, force_drop_ids=None):
+        For standard ImageNet DiT fine-tuning, ``num_super_classes=1`` means a
+        single unconditional/null embedding at index ``num_classes``. The
+        original FineDiffusion iNat setup uses 11 hand-defined superclasses.
         """
-        Drops labels to enable classifier-free guidance.
-        """
-        if force_drop_ids is None:
-            drop_ids = torch.rand(labels.shape[0], device=labels.device) < self.dropout_prob
-        else:
-            drop_ids = force_drop_ids == 1
-        
-        # subclass->superclass
-        map_list = torch.ones([10000],device=labels.device) * 10  # Animalia
+        if self.num_super_classes == 1:
+            return torch.full_like(labels, self.num_classes)
+
+        if self.num_classes != 10000 or self.num_super_classes != 11:
+            raise ValueError(
+                "No superclass mapping is defined for "
+                f"num_classes={self.num_classes}, num_super_classes={self.num_super_classes}. "
+                "Use --num-super-classes 1 for a single CFG/null label, or add a "
+                "dataset-specific subclass-to-superclass mapping."
+            )
+
+        if labels.numel() > 0:
+            min_label = int(labels.min().item())
+            max_label = int(labels.max().item())
+            if min_label < 0 or max_label >= self.num_classes:
+                raise ValueError(
+                    f"Class labels must be in [0, {self.num_classes - 1}], "
+                    f"got [{min_label}, {max_label}]."
+                )
+
+        map_list = torch.ones([self.num_classes], device=labels.device, dtype=torch.long) * 10  # Animalia
         map_list[5729:9999 + 1] = 0  # Plants
         map_list[175:2700 + 1] = 1  # Insects
         map_list[3111:4596 + 1] = 2  # Birds
@@ -104,8 +119,19 @@ class LabelEmbedder(nn.Module):
         map_list[2939:3108 + 1] = 7  # Amphibians
         map_list[5219:5387 + 1] = 8  # Mollusks
         map_list[4:156 + 1] = 9  # Arachnids
-        
-        labels[drop_ids] = map_list[labels[drop_ids]].long() + self.num_classes
+        return map_list[labels].long() + self.num_classes
+
+    def token_drop(self, labels, force_drop_ids=None):
+        """
+        Drops labels to enable classifier-free guidance.
+        """
+        labels = labels.clone()
+        if force_drop_ids is None:
+            drop_ids = torch.rand(labels.shape[0], device=labels.device) < self.dropout_prob
+        else:
+            drop_ids = force_drop_ids == 1
+
+        labels[drop_ids] = self.superclass_labels(labels[drop_ids])
         
         return labels
 

@@ -153,7 +153,17 @@ def main(args):
     
     if args.resume:
         state_dict = find_model(args.resume)
-        state_dict.pop('y_embedder.embedding_table.weight', None)
+        model_state = model.state_dict()
+        incompatible_keys = [
+            key for key, value in state_dict.items()
+            if key in model_state and value.shape != model_state[key].shape
+        ]
+        for key in incompatible_keys:
+            logger.info(
+                f"Skipping checkpoint parameter with incompatible shape: "
+                f"{key} {tuple(state_dict[key].shape)} -> {tuple(model_state[key].shape)}"
+            )
+            state_dict.pop(key)
         model.load_state_dict(state_dict, strict=False)
 
 
@@ -197,6 +207,12 @@ def main(args):
         transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5], inplace=True)
     ])
     dataset = ImageFolder(args.data_path, transform=transform)
+    if len(dataset.classes) != args.num_classes:
+        raise ValueError(
+            f"ImageFolder found {len(dataset.classes)} classes in {args.data_path}, "
+            f"but --num-classes is {args.num_classes}. Make sure the dataset root "
+            "contains exactly one subdirectory per class, or update --num-classes."
+        )
     sampler = DistributedSampler(
         dataset,
         num_replicas=dist.get_world_size(),
@@ -215,7 +231,7 @@ def main(args):
     )
     logger.info(f"Dataset contains {len(dataset):,} images ({args.data_path})")
 
-    logger.info(f"Dataset contains  {args.num_classes} classes in {args.num_super_classes} superclasses")
+    logger.info(f"Dataset contains {len(dataset.classes)} classes in {args.num_super_classes} superclasses")
 
     # Prepare models for training:
     update_ema(ema, model.module, decay=0)  # Ensure EMA is initialized with synced weights
